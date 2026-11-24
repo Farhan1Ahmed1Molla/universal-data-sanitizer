@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Real Estate Sales Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans">
+
+  <!-- Header & Controls -->
+  <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-10">
+    <div class="max-w-7xl mx-auto px-6 py-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+      <div>
+        <h1 class="text-xl font-bold tracking-tight text-white">Real Estate Sales Dashboard</h1>
+        <p id="statusText" class="text-xs text-slate-400">Upload your cleaned CSV (sale_price, sale_date_dt, property_city, land_use)</p>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-3">
+        <!-- CSV Upload Button -->
+        <label class="cursor-pointer bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition shadow">
+          Upload Cleaned CSV
+          <input type="file" id="csvFileInput" accept=".csv" class="hidden" />
+        </label>
+
+        <!-- Land Use Filter -->
+        <select id="landUseFilter" disabled class="bg-slate-800 border border-slate-700 text-sm rounded-lg px-3 py-2 text-slate-200 disabled:opacity-40">
+          <option value="ALL">All Land Uses</option>
+        </select>
+
+        <!-- Year Filter -->
+        <select id="yearFilter" disabled class="bg-slate-800 border border-slate-700 text-sm rounded-lg px-3 py-2 text-slate-200 disabled:opacity-40">
+          <option value="ALL">All Years</option>
+        </select>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-7xl mx-auto px-6 py-8 space-y-6">
+
+    <!-- KPI Row -->
+    <section class="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-lg">
+        <p class="text-xs uppercase tracking-wider text-slate-400 font-semibold">Total Transactions</p>
+        <p id="kpiCount" class="text-3xl font-bold text-white mt-2">—</p>
+      </div>
+
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-lg">
+        <p class="text-xs uppercase tracking-wider text-slate-400 font-semibold">Total Sales Volume</p>
+        <p id="kpiRevenue" class="text-3xl font-bold text-emerald-400 mt-2">—</p>
+      </div>
+
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-lg">
+        <p class="text-xs uppercase tracking-wider text-slate-400 font-semibold">Average Sale Price</p>
+        <p id="kpiAvg" class="text-3xl font-bold text-indigo-400 mt-2">—</p>
+      </div>
+    </section>
+
+    <!-- Charts Row -->
+    <section class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <!-- Time Series Chart -->
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-lg">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-sm font-semibold text-slate-200">Monthly Sales Volume Over Time</h2>
+          <span class="text-xs text-slate-500">sale_date_dt</span>
+        </div>
+        <div class="h-80">
+          <canvas id="timelineChart"></canvas>
+        </div>
+      </div>
+
+      <!-- Top Cities Bar Chart -->
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-lg">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-sm font-semibold text-slate-200">Top 10 Cities by Transactions</h2>
+          <span class="text-xs text-slate-500">property_city</span>
+        </div>
+        <div class="h-80">
+          <canvas id="cityChart"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- Land Use Breakdown Chart -->
+    <section class="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-lg">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-sm font-semibold text-slate-200">Transactions by Property / Land Use</h2>
+        <span class="text-xs text-slate-500">land_use</span>
+      </div>
+      <div class="h-72">
+        <canvas id="landUseChart"></canvas>
+      </div>
+    </section>
+
+  </main>
+
+  <script>
+    let rawData = [];
+    let timelineChartInstance = null;
+    let cityChartInstance = null;
+    let landUseChartInstance = null;
+
+    const formatCompactCurrency = (num) => {
+      if (num >= 1e9) return '$' + (num / 1e9).toFixed(2) + 'B';
+      if (num >= 1e6) return '$' + (num / 1e6).toFixed(2) + 'M';
+      if (num >= 1e3) return '$' + (num / 1e3).toFixed(1) + 'K';
+      return '$' + num.toFixed(0);
+    };
+
+    document.getElementById('csvFileInput').addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      document.getElementById('statusText').textContent = `Parsing ${file.name}...`;
+
+      Papa.parse(file, {
+        header: true,
+        skipEmptyLines: true,
+        complete: (results) => {
+          rawData = results.data.map(row => {
+            const price = parseFloat(String(row.sale_price || '0').replace(/[^0-9.-]+/g, '')) || 0;
+            const dateStr = (row.sale_date_dt || row.sale_date || '').trim();
+            const year = dateStr.length >= 4 ? dateStr.substring(0, 4) : 'Unknown';
+            const ym = dateStr.length >= 7 ? dateStr.substring(0, 7) : 'Unknown';
+            return {
+              sale_price: price,
+              year: year,
+              ym: ym,
+              property_city: (row.property_city || 'UNKNOWN').trim().toUpperCase(),
+              land_use: (row.land_use || 'UNKNOWN').trim().toUpperCase()
+            };
+          });
+
+          populateFilters(rawData);
+          updateDashboard();
+          document.getElementById('statusText').textContent = `Loaded ${rawData.length.toLocaleString()} records from ${file.name}`;
+        }
+      });
+    });
+
+    function populateFilters(data) {
+      const landSelect = document.getElementById('landUseFilter');
+      const yearSelect = document.getElementById('yearFilter');
+
+      const landUses = [...new Set(data.map(d => d.land_use))].filter(Boolean).sort();
+      const years = [...new Set(data.map(d => d.year))].filter(y => /^\d{4}$/.test(y)).sort();
+
+      landSelect.innerHTML = '<option value="ALL">All Land Uses</option>' +
+        landUses.map(l => `<option value="${l}">${l}</option>`).join('');
+
+      yearSelect.innerHTML = '<option value="ALL">All Years</option>' +
+        years.map(y => `<option value="${y}">${y}</option>`).join('');
+
+      landSelect.disabled = false;
+      yearSelect.disabled = false;
+    }
+
+    document.getElementById('landUseFilter').addEventListener('change', updateDashboard);
+    document.getElementById('yearFilter').addEventListener('change', updateDashboard);
+
+    function updateDashboard() {
+      const selectedLand = document.getElementById('landUseFilter').value;
+      const selectedYear = document.getElementById('yearFilter').value;
+
+      const filtered = rawData.filter(d => {
+        const matchLand = selectedLand === 'ALL' || d.land_use === selectedLand;
+        const matchYear = selectedYear === 'ALL' || d.year === selectedYear;
+        return matchLand && matchYear;
+      });
+
+      // KPIs
+      const count = filtered.length;
+      const totalRevenue = filtered.reduce((sum, d) => sum + d.sale_price, 0);
+      const avgPrice = count > 0 ? totalRevenue / count : 0;
+
+      document.getElementById('kpiCount').textContent = count.toLocaleString();
+      document.getElementById('kpiRevenue').textContent = formatCompactCurrency(totalRevenue);
+      document.getElementById('kpiAvg').textContent = formatCompactCurrency(avgPrice);
+
+      // Monthly Aggregation
+      const monthlyMap = {};
+      filtered.forEach(d => {
+        if (d.ym !== 'Unknown') {
+          monthlyMap[d.ym] = (monthlyMap[d.ym] || 0) + d.sale_price;
+        }
+      });
+      const sortedMonths = Object.keys(monthlyMap).sort();
+      const monthlyValues = sortedMonths.map(m => monthlyMap[m]);
+
+      // City Aggregation (Top 10)
+      const cityMap = {};
+      filtered.forEach(d => {
+        cityMap[d.property_city] = (cityMap[d.property_city] || 0) + 1;
+      });
+      const topCities = Object.entries(cityMap)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10);
+
+      // Land Use Aggregation (Top 8)
+      const landMap = {};
+      filtered.forEach(d => {
+        landMap[d.land_use] = (landMap[d.land_use] || 0) + 1;
+      });
+      const topLand = Object.entries(landMap)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 8);
+
+      renderCharts(sortedMonths, monthlyValues, topCities, topLand);
+    }
+
+    function renderCharts(months, monthVals, topCities, topLand) {
+      const commonGrid = { color: '#1e293b' };
+      const commonTicks = { color: '#94a3b8', font: { size: 11 } };
+
+      if (timelineChartInstance) timelineChartInstance.destroy();
+      timelineChartInstance = new Chart(document.getElementById('timelineChart'), {
+        type: 'line',
+        data: {
+          labels: months,
+          datasets: [{
+            label: 'Monthly Sales ($)',
+            data: monthVals,
+            borderColor: '#34d399',
+            backgroundColor: 'rgba(52, 211, 153, 0.12)',
+            borderWidth: 2,
+            fill: true,
+            tension: 0.25,
+            pointRadius: 1.5
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { grid: commonGrid, ticks: commonTicks },
+            y: {
+              grid: commonGrid,
+              ticks: {
+                ...commonTicks,
+                callback: (v) => formatCompactCurrency(v)
+              }
+            }
+          }
+        }
+      });
+
+      if (cityChartInstance) cityChartInstance.destroy();
+      cityChartInstance = new Chart(document.getElementById('cityChart'), {
+        type: 'bar',
+        data: {
+          labels: topCities.map(c => c[0]),
+          datasets: [{
+            label: 'Transactions',
+            data: topCities.map(c => c[1]),
+            backgroundColor: '#6366f1',
+            borderRadius: 6
+          }]
+        },
+        options: {
+          indexAxis: 'y',
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { grid: commonGrid, ticks: commonTicks },
+            y: { grid: { display: false }, ticks: commonTicks }
+          }
+        }
+      });
+
+      if (landUseChartInstance) landUseChartInstance.destroy();
+      landUseChartInstance = new Chart(document.getElementById('landUseChart'), {
+        type: 'bar',
+        data: {
+          labels: topLand.map(l => l[0]),
+          datasets: [{
+            label: 'Transactions',
+            data: topLand.map(l => l[1]),
+            backgroundColor: '#38bdf8',
+            borderRadius: 6
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { grid: { display: false }, ticks: commonTicks },
+            y: { grid: commonGrid, ticks: commonTicks }
+          }
+        }
+      });
+    }
+  </script>
+</body>
+</html>
